@@ -1,12 +1,18 @@
 package apoc.util;
 
+
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.filefilter.WildcardFileFilter;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.gradle.tooling.GradleConnector;
 import org.gradle.tooling.ProjectConnection;
 import org.neo4j.driver.v1.Record;
 import org.neo4j.driver.v1.Session;
 import org.testcontainers.utility.MountableFile;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStreamReader;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Collections;
@@ -27,20 +33,33 @@ public class TestContainerUtil {
 
 
 
-    public static TestcontainersCausalCluster createEnterpriseCluster(int numOfCoreInstances, int numberOfReadReplica, Map<String, Object> neo4jConfig) {
-        return TestcontainersCausalCluster.create(numOfCoreInstances, numberOfReadReplica, Duration.ofMinutes(4), neo4jConfig);
+    public static TestcontainersCausalCluster createEnterpriseCluster(int numOfCoreInstances, int numberOfReadReplica, Map<String, Object> neo4jConfig, Map<String, String> envSettings) {
+        return TestcontainersCausalCluster.create(numOfCoreInstances, numberOfReadReplica, Duration.ofMinutes(4), neo4jConfig, envSettings);
     }
 
     public static Neo4jContainerExtension createEnterpriseDB(boolean withLogging) {
         // We define the container with external volumes
-        Neo4jContainerExtension neo4jContainer = new Neo4jContainerExtension("neo4j:3.5.3-enterprise")
+        Neo4jContainerExtension neo4jContainer = new Neo4jContainerExtension("neo4j:3.5.17-enterprise")
                 .withPlugins(MountableFile.forHostPath("./target/tests/gradle-build/libs")) // map the apoc's artifact dir as the Neo4j's plugin dir
                 .withAdminPassword("apoc")
                 .withNeo4jConfig("apoc.export.file.enabled", "true")
                 .withNeo4jConfig("dbms.security.procedures.unrestricted", "apoc.*")
-//                .withEnv("NEO4J_wrapper_java_additional","-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=5005 -Xdebug-Xnoagent-Djava.compiler=NONE-Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=5005")
-                .withFileSystemBind("./target/import", "/import") // map the "target/import" dir as the Neo4j's import dir
-                .withEnv("NEO4J_ACCEPT_LICENSE_AGREEMENT", "yes");
+                .withFileSystemBind("./target/import", "/var/lib/neo4j/import") // map the "target/import" dir as the Neo4j's import dir
+                .withEnv("NEO4J_ACCEPT_LICENSE_AGREEMENT", "yes")
+                // set uid if possible - export tests do write to "/import"
+                .withCreateContainerCmdModifier(cmd -> {
+                    try {
+                        Process p = Runtime.getRuntime().exec("id -u");
+                        BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                        String s = br.readLine();
+                        p.waitFor();
+                        p.destroy();
+                        cmd.withUser(s);
+                    } catch (Exception e) {
+                        System.out.println("Exception while assign cmd user to docker container:\n" + ExceptionUtils.getStackTrace(e));
+                        // ignore since it may fail depending on operating system
+                    }
+                });
         if (withLogging) {
             neo4jContainer.withLogging();
         }

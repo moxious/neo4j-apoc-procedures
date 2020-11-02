@@ -1,29 +1,36 @@
 package apoc.load;
 
 import apoc.ApocConfiguration;
+import apoc.periodic.Periodic;
 import apoc.util.TestUtil;
 import apoc.util.Util;
 import org.apache.commons.lang.exception.ExceptionUtils;
-import org.junit.*;
+import org.hamcrest.Matchers;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
 import org.junit.rules.TestName;
 import org.neo4j.graphdb.GraphDatabaseService;
-import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.QueryExecutionException;
-import org.neo4j.graphdb.Relationship;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 
-import java.sql.*;
-import java.time.*;
-import java.util.Calendar;
-import java.util.Collections;
-import java.util.List;
+import java.io.Serializable;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Types;
+import java.time.ZoneId;
 import java.util.Map;
 
 import static apoc.util.MapUtil.map;
 import static apoc.util.TestUtil.testCall;
 import static apoc.util.TestUtil.testResult;
-import static java.util.Collections.emptyList;
 import static junit.framework.TestCase.assertTrue;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 
 public class JdbcTest extends AbstractJdbcTest {
@@ -44,7 +51,7 @@ public class JdbcTest extends AbstractJdbcTest {
         ApocConfiguration.addToConfig(map("jdbc.derby.url","jdbc:derby:derbyDB"));
         ApocConfiguration.addToConfig(map("jdbc.test.sql","SELECT * FROM PERSON"));
         ApocConfiguration.addToConfig(map("jdbc.testparams.sql","SELECT * FROM PERSON WHERE NAME = ?"));
-        TestUtil.registerProcedure(db,Jdbc.class);
+        TestUtil.registerProcedure(db, Jdbc.class, Periodic.class);
         createPersonTableAndData();
     }
 
@@ -104,12 +111,14 @@ public class JdbcTest extends AbstractJdbcTest {
 
         testCall(db, "CALL apoc.load.jdbc('jdbc:derby:derbyDB','SELECT * FROM PERSON WHERE NAME = ?',['John'], {config})",
                 map("config", map("timezone", asiaTokio.toString())),
-                (row) -> assertEquals(Util.map("NAME", "John", "SURNAME", null,
+                (row) -> {
+                    Map<String, ? extends Serializable> expected = Util.map("NAME", "John", "SURNAME", null,
                             "HIRE_DATE", hireDate.toLocalDate(),
-                            "EFFECTIVE_FROM_DATE", effectiveFromDate.toInstant().atZone(asiaTokio).toOffsetDateTime(),
+                            "EFFECTIVE_FROM_DATE", effectiveFromDate.toInstant().atZone(asiaTokio).toOffsetDateTime(), // todo investigate why by only changing the procedure mode returned class type changes
                             "TEST_TIME", time.toLocalTime(),
-                            "NULL_DATE", null), row.get("row")
-                )
+                            "NULL_DATE", null);
+                    assertThat(row.get("row"), Matchers.equalTo(expected));
+                }
         );
     }
 
@@ -194,6 +203,39 @@ public class JdbcTest extends AbstractJdbcTest {
             assertEquals("In config param credentials must be passed both user and password.", except.getMessage());
             throw e;
         }
+
+    }
+
+    @Test
+    public void testWithPeriodic() throws Exception {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("delete from person");
+            stmt.execute("select count(*) as size from person");
+            stmt.getResultSet().next();
+            int size = stmt.getResultSet().getInt("size");
+            assertEquals(0 , size);
+        } catch (Exception e) { }
+
+        db.execute("UNWIND range(1, 100) AS id CREATE (p:Person{id: id, name: 'Name ' + id, surname: 'Surname ' + id})").close();
+        String query = "CALL apoc.periodic.iterate(\n" +
+                "'MATCH (p:Person) RETURN p.name AS name, p.surname AS surname limit 1',\n" +
+                "\"CALL apoc.load.jdbcUpdate($url, 'INSERT INTO PERSON(NAME, SURNAME) VALUES(?, ?)', [name, surname]) YIELD row RETURN 'DONE'\",\n" +
+                "{batchSize: 20, iterateList: false, params: {url: $url}, parallel: true}\n" +
+                ")\n" +
+                "YIELD committedOperations, failedOperations, failedBatches, errorMessages\n" +
+                "RETURN *";
+        testCall(db,
+                query,
+                Util.map("url", "jdbc:derby:derbyDB"),
+                (row) -> {
+                    try (Statement stmt = conn.createStatement()) {
+                        stmt.execute("select count(*) as size from person");
+                        stmt.getResultSet().next();
+                        int size = stmt.getResultSet().getInt("size");
+                        assertEquals(1, size);
+                    } catch (Exception e) { }
+                });
+
 
     }
 
